@@ -60,10 +60,10 @@ class ValidityPeriod(str, Enum):
 
 VALIDITY_PERIODS = {
     ValidityPeriod.HALF_HOUR: {"name": "نصف ساعة", "minutes": 30},
-    ValidityPeriod.ONE_HOUR: {"name": "ساعة واحدة", "hours": 1},
-    ValidityPeriod.ONE_DAY: {"name": "يوم واحد", "days": 1},
-    ValidityPeriod.ONE_WEEK: {"name": "أسبوع", "days": 7},
-    ValidityPeriod.ONE_MONTH: {"name": "شهر", "days": 30},
+    ValidityPeriod.ONE_HOUR: {"name": "ساعة واحدة", "minutes": 60},
+    ValidityPeriod.ONE_DAY: {"name": "يوم واحد", "minutes": 1440},
+    ValidityPeriod.ONE_WEEK: {"name": "أسبوع", "minutes": 10080},
+    ValidityPeriod.ONE_MONTH: {"name": "شهر", "minutes": 43200},
 }
 
 # =====================================================
@@ -155,10 +155,6 @@ def calculate_expiration(period: str, custom_days: Optional[int] = None) -> date
         
         if "minutes" in period_config:
             return now + datetime.timedelta(minutes=period_config["minutes"])
-        elif "hours" in period_config:
-            return now + datetime.timedelta(hours=period_config["hours"])
-        elif "days" in period_config:
-            return now + datetime.timedelta(days=period_config["days"])
     except:
         pass
     
@@ -180,32 +176,40 @@ def format_remaining_time(expires_at: datetime.datetime) -> str:
         return "منتهي"
     
     diff = expires_at - now
+    total_seconds = int(diff.total_seconds())
     
-    if diff.days > 0:
-        if diff.days == 1:
+    # تحويل بالدقائق بدلاً من الأيام
+    total_minutes = total_seconds // 60
+    
+    if total_minutes >= 1440:  # يوم واحد أو أكثر
+        days = total_minutes // 1440
+        if days == 1:
             return "يوم واحد"
-        elif diff.days == 2:
+        elif days == 2:
             return "يومين"
-        elif diff.days <= 10:
-            return f"{diff.days} أيام"
+        elif days <= 10:
+            return f"{days} أيام"
         else:
-            return f"{diff.days} يوم"
-    elif diff.seconds >= 3600:
-        hours = diff.seconds // 3600
+            return f"{days} يوم"
+    elif total_minutes >= 60:  # ساعة أو أكثر
+        hours = total_minutes // 60
         if hours == 1:
             return "ساعة واحدة"
         elif hours == 2:
             return "ساعتين"
-        else:
+        elif hours <= 10:
             return f"{hours} ساعات"
-    elif diff.seconds >= 60:
-        minutes = diff.seconds // 60
-        if minutes == 1:
-            return "دقيقة واحدة"
-        elif minutes == 2:
-            return "دقيقتين"
         else:
-            return f"{minutes} دقائق"
+            return f"{hours} ساعة"
+    elif total_minutes >= 1:  # دقيقة أو أكثر
+        if total_minutes == 1:
+            return "دقيقة واحدة"
+        elif total_minutes == 2:
+            return "دقيقتين"
+        elif total_minutes <= 10:
+            return f"{total_minutes} دقائق"
+        else:
+            return f"{total_minutes} دقيقة"
     else:
         return "أقل من دقيقة"
 
@@ -236,6 +240,19 @@ def duration_to_seconds(duration: str) -> int:
         return 30 * 24 * 60 * 60  # شهر
     else:
         return 30 * 24 * 60 * 60  # افتراضي شهر
+
+def duration_to_minutes(duration: str) -> int:
+    """تحويل المدة إلى دقائق"""
+    if duration == "30m":
+        return 30
+    elif duration == "1h":
+        return 60
+    elif duration == "1d":
+        return 24 * 60
+    elif duration == "30d":
+        return 30 * 24 * 60
+    else:
+        return 30 * 24 * 60  # افتراضي شهر
 
 # =====================================================
 # PROFESSIONAL ENHANCEMENT FUNCTIONS
@@ -561,11 +578,16 @@ def activate(data: ActivateRequest):
     
     token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
     
+    # حساب الوقت المتبقي بالدقائق بدلاً من الأيام
+    total_minutes = duration_to_minutes(duration)
+    
     return {
         "token": token,
         "expires_at": (datetime.datetime.utcnow() + delta).isoformat(),
         "expires_in_seconds": int(delta.total_seconds()),
-        "duration": duration
+        "expires_in_minutes": total_minutes,
+        "duration": duration,
+        "duration_name": get_period_name(duration)
     }
 
 # -----------------------------------------------------
