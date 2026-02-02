@@ -469,4 +469,4 @@ def generate_v2(data: dict, x_token: str = Header(..., alias="X-Token")):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000) 
