@@ -10,7 +10,6 @@ import jwt
 import google.generativeai as genai
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
 # تحميل متغيرات البيئة من ملف .env
 load_dotenv()
