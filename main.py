@@ -6,7 +6,6 @@ import secrets
 import jwt
 import google.generativeai as genai
 
-from enum import Enum
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -21,18 +20,12 @@ if not JWT_SECRET or not ADMIN_TOKEN:
     raise RuntimeError("JWT_SECRET or ADMIN_TOKEN missing")
 
 # =====================================================
-# Gemini API Keys
+# GEMINI KEYS (AUTO DISCOVERY) ✅ الخيار 2
 # =====================================================
 GEMINI_KEYS = [
-    os.getenv("GEMINI_API_KEY_1"),
-    os.getenv("GEMINI_API_KEY_2"),
-    os.getenv("GEMINI_API_KEY_3"),
-    os.getenv("GEMINI_API_KEY_4"),
-    os.getenv("GEMINI_API_KEY_5"),
-    os.getenv("GEMINI_API_KEY_6"),
-    os.getenv("GEMINI_API_KEY_7"),
+    v for k, v in os.environ.items()
+    if k.startswith("GEMINI_API_KEY_")
 ]
-GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 
 if not GEMINI_KEYS:
     raise RuntimeError("No Gemini API Keys found")
@@ -44,24 +37,10 @@ app = FastAPI(title="Educational AI Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # غيّرها لاحقاً إلى دومينك
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# =====================================================
-# ENUMS
-# =====================================================
-class ValidityPeriod(str, Enum):
-    M30 = "30m"
-    H1  = "1h"
-    H3  = "3h"
-    D1  = "1d"
-    D3  = "3d"
-    D7  = "7d"
-    M1  = "1m"
-    M3  = "3m"
-    M5  = "5m"
 
 # =====================================================
 # MODELS
@@ -73,10 +52,10 @@ class ActivateRequest(BaseModel):
     code: str
 
 # =====================================================
-# STORAGE (In-Memory)
+# SIMPLE STORAGE (in-memory)
+# ⚠️ للاستعمال الإنتاجي استخدم Redis أو DB
 # =====================================================
-# code_hash : { expires_at, period }
-VALID_CODES = {}
+VALID_CODES = {}  # code_hash : expiration_datetime
 
 # =====================================================
 # HELPERS
@@ -87,27 +66,10 @@ def pick_gemini_model():
     return genai.GenerativeModel("models/gemini-2.5-flash-lite")
 
 def generate_short_code():
-    return secrets.token_hex(3).upper()
+    return secrets.token_hex(3).upper()  # مثال: A9F3C2
 
 def hash_code(code: str):
     return hashlib.sha256(code.encode()).hexdigest()
-
-def calculate_expiration(period: ValidityPeriod) -> datetime.datetime:
-    now = datetime.datetime.utcnow()
-
-    mapping = {
-        ValidityPeriod.M30: datetime.timedelta(minutes=30),
-        ValidityPeriod.H1:  datetime.timedelta(hours=1),
-        ValidityPeriod.H3:  datetime.timedelta(hours=3),
-        ValidityPeriod.D1:  datetime.timedelta(days=1),
-        ValidityPeriod.D3:  datetime.timedelta(days=3),
-        ValidityPeriod.D7:  datetime.timedelta(days=7),
-        ValidityPeriod.M1:  datetime.timedelta(days=30),
-        ValidityPeriod.M3:  datetime.timedelta(days=90),
-        ValidityPeriod.M5:  datetime.timedelta(days=150),
-    }
-
-    return now + mapping[period]
 
 def verify_jwt(token: str):
     try:
@@ -121,6 +83,22 @@ def verify_jwt(token: str):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # =====================================================
+# DURATIONS MAP ✅
+# =====================================================
+DURATION_MAP = {
+    "5m":  datetime.timedelta(minutes=5),
+    "30m": datetime.timedelta(minutes=30),
+    "1h":  datetime.timedelta(hours=1),
+    "3h":  datetime.timedelta(hours=3),
+    "1d":  datetime.timedelta(days=1),
+    "3d":  datetime.timedelta(days=3),
+    "7d":  datetime.timedelta(days=7),
+    "1m":  datetime.timedelta(days=30),
+    "3m":  datetime.timedelta(days=90),
+    "5mth": datetime.timedelta(days=150),
+}
+
+# =====================================================
 # ROUTES
 # =====================================================
 @app.get("/")
@@ -131,36 +109,38 @@ def health():
     }
 
 # -----------------------------------------------------
-# Generate Activation Code (Admin)
+# توليد كود تفعيل (مشرف)
+# مثال:
+# /generate-code?key=ADMIN_TOKEN&duration=5m
 # -----------------------------------------------------
 @app.get("/generate-code")
 def generate_code(
-    key: str,
-    period: ValidityPeriod = Query(
-        ValidityPeriod.M1,
-        description="مدة صلاحية كود التفعيل"
-    )
+    key: str = Query(...),
+    duration: str = Query("1d")
 ):
     if key != ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    if duration not in DURATION_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid duration. Allowed: {list(DURATION_MAP.keys())}"
+        )
+
     short_code = generate_short_code()
     code_hash = hash_code(short_code)
-    expires_at = calculate_expiration(period)
 
-    VALID_CODES[code_hash] = {
-        "expires_at": expires_at,
-        "period": period.value
-    }
+    expires_at = datetime.datetime.utcnow() + DURATION_MAP[duration]
+    VALID_CODES[code_hash] = expires_at
 
     return {
         "activation_code": short_code,
-        "period": period.value,
-        "expires_at": expires_at.isoformat()
+        "expires_at": expires_at.isoformat(),
+        "duration": duration
     }
 
 # -----------------------------------------------------
-# Activate Code
+# تفعيل الأداة (المستخدم)
 # -----------------------------------------------------
 @app.post("/activate")
 def activate(data: ActivateRequest):
@@ -169,17 +149,16 @@ def activate(data: ActivateRequest):
         raise HTTPException(status_code=400, detail="Code required")
 
     code_hash = hash_code(code)
-    code_data = VALID_CODES.get(code_hash)
+    expires_at = VALID_CODES.get(code_hash)
 
-    if not code_data:
+    if not expires_at:
         raise HTTPException(status_code=403, detail="Invalid code")
-
-    expires_at = code_data["expires_at"]
 
     if expires_at < datetime.datetime.utcnow():
         VALID_CODES.pop(code_hash, None)
         raise HTTPException(status_code=403, detail="Code expired")
 
+    # JWT ينتهي مع نفس مدة الكود
     payload = {
         "type": "activation",
         "exp": expires_at
@@ -189,12 +168,11 @@ def activate(data: ActivateRequest):
 
     return {
         "token": token,
-        "expires_at": expires_at.isoformat(),
-        "period": code_data["period"]
+        "expires_at": expires_at.isoformat()
     }
 
 # -----------------------------------------------------
-# Verify Token
+# تحقق من التفعيل
 # -----------------------------------------------------
 @app.get("/verify")
 def verify(x_token: str = Header(..., alias="X-Token")):
@@ -202,7 +180,7 @@ def verify(x_token: str = Header(..., alias="X-Token")):
     return {"status": "ok"}
 
 # -----------------------------------------------------
-# AI Generate
+# الذكاء الاصطناعي
 # -----------------------------------------------------
 @app.post("/generate")
 def generate(data: AskRequest, x_token: str = Header(..., alias="X-Token")):
