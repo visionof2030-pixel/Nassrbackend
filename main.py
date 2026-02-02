@@ -52,22 +52,18 @@ app.add_middleware(
 # ENUMS & CONSTANTS
 # =====================================================
 class ValidityPeriod(str, Enum):
-    HALF_HOUR = "30_min"
-    ONE_HOUR = "1_hour"
-    ONE_DAY = "1_day"
-    THREE_DAYS = "3_days"
-    ONE_WEEK = "1_week"
-    ONE_MONTH = "1_month"
-    THREE_MONTHS = "3_months"
+    HALF_HOUR = "30m"
+    ONE_HOUR = "1h"
+    ONE_DAY = "1d"
+    ONE_WEEK = "1w"
+    ONE_MONTH = "30d"
 
 VALIDITY_PERIODS = {
     ValidityPeriod.HALF_HOUR: {"name": "نصف ساعة", "minutes": 30},
     ValidityPeriod.ONE_HOUR: {"name": "ساعة واحدة", "hours": 1},
     ValidityPeriod.ONE_DAY: {"name": "يوم واحد", "days": 1},
-    ValidityPeriod.THREE_DAYS: {"name": "٣ أيام", "days": 3},
     ValidityPeriod.ONE_WEEK: {"name": "أسبوع", "days": 7},
     ValidityPeriod.ONE_MONTH: {"name": "شهر", "days": 30},
-    ValidityPeriod.THREE_MONTHS: {"name": "٣ أشهر", "days": 90},
 }
 
 # =====================================================
@@ -78,6 +74,7 @@ class AskRequest(BaseModel):
 
 class ActivateRequest(BaseModel):
     code: str
+    duration: str = "30d"  # القيمة الافتراضية: شهر
 
 class ReportRequest(BaseModel):
     report_type: str
@@ -226,6 +223,19 @@ def cleanup_expired_codes():
     
     if expired_hashes:
         print(f"تم تنظيف {len(expired_hashes)} كود منتهي")
+
+def duration_to_seconds(duration: str) -> int:
+    """تحويل المدة إلى ثواني"""
+    if duration == "30m":
+        return 30 * 60  # 30 دقيقة
+    elif duration == "1h":
+        return 60 * 60  # ساعة واحدة
+    elif duration == "1d":
+        return 24 * 60 * 60  # يوم واحد
+    elif duration == "30d":
+        return 30 * 24 * 60 * 60  # شهر
+    else:
+        return 30 * 24 * 60 * 60  # افتراضي شهر
 
 # =====================================================
 # PROFESSIONAL ENHANCEMENT FUNCTIONS
@@ -447,7 +457,7 @@ def health():
 @app.get("/generate-code")
 def generate_code(
     key: str,
-    period: str = "1_month",
+    period: str = "30d",
     custom_days: Optional[int] = None
 ):
     """توليد كود تفعيل مع صلاحية محددة"""
@@ -512,6 +522,8 @@ def get_validity_periods():
 @app.post("/activate")
 def activate(data: ActivateRequest):
     code = data.code.strip()
+    duration = data.duration
+    
     if not code:
         raise HTTPException(status_code=400, detail="Code required")
     
@@ -527,14 +539,24 @@ def activate(data: ActivateRequest):
         VALID_CODES.pop(code_hash, None)
         raise HTTPException(status_code=403, detail="Code expired")
     
-    # إصدار JWT استخدام مع صلاحية الكود
-    remaining_time = expires_at - datetime.datetime.utcnow()
-    jwt_exp_days = min(remaining_time.days, 365)  # حد أقصى 365 يوم
+    # تحديد مدة التوكن بناءً على المدة المحددة
+    if duration == "30m":
+        delta = datetime.timedelta(minutes=30)
+    elif duration == "1h":
+        delta = datetime.timedelta(hours=1)
+    elif duration == "1d":
+        delta = datetime.timedelta(days=1)
+    elif duration == "30d":
+        delta = datetime.timedelta(days=30)
+    else:
+        delta = datetime.timedelta(days=30)  # افتراضي
     
+    # إصدار JWT
     payload = {
         "type": "activation",
         "code_period": code_data["period"],
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(days=jwt_exp_days)
+        "user_duration": duration,
+        "exp": datetime.datetime.utcnow() + delta
     }
     
     token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
@@ -543,8 +565,9 @@ def activate(data: ActivateRequest):
         "token": token,
         "validity_info": {
             "period": code_data["period_name"],
-            "expires_at": expires_at.isoformat(),
-            "remaining": format_remaining_time(expires_at)
+            "user_duration": duration,
+            "expires_at": (datetime.datetime.utcnow() + delta).isoformat(),
+            "remaining": format_remaining_time(datetime.datetime.utcnow() + delta)
         }
     }
 
@@ -560,6 +583,7 @@ def verify(x_token: str = Header(..., alias="X-Token")):
         "token_info": {
             "type": payload.get("type"),
             "period": payload.get("code_period", "unknown"),
+            "user_duration": payload.get("user_duration", "30d"),
             "expires_at": datetime.datetime.fromtimestamp(payload["exp"]).isoformat()
         }
     }
