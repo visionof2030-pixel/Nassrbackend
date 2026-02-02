@@ -1,31 +1,32 @@
 import os
 import random
-import datetime
 import hashlib
 import secrets
+from datetime import datetime, timedelta
+
 import jwt
 import google.generativeai as genai
 
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # =====================================================
 # ENV
 # =====================================================
-JWT_SECRET = os.getenv("JWT_SECRET")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+JWT_SECRET = os.getenv("JWT_SECRET", "CHANGE_ME_SECRET")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "FahadJassar14061436")
 
-if not JWT_SECRET or not ADMIN_TOKEN:
-    raise RuntimeError("JWT_SECRET or ADMIN_TOKEN missing")
-
-# =====================================================
-# GEMINI KEYS (AUTO DISCOVERY) ✅ الخيار 2
-# =====================================================
 GEMINI_KEYS = [
-    v for k, v in os.environ.items()
-    if k.startswith("GEMINI_API_KEY_")
+    os.getenv("GEMINI_API_KEY_1"),
+    os.getenv("GEMINI_API_KEY_2"),
+    os.getenv("GEMINI_API_KEY_3"),
+    os.getenv("GEMINI_API_KEY_4"),
+    os.getenv("GEMINI_API_KEY_5"),
+    os.getenv("GEMINI_API_KEY_6"),
+    os.getenv("GEMINI_API_KEY_7"),
 ]
+GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 
 if not GEMINI_KEYS:
     raise RuntimeError("No Gemini API Keys found")
@@ -33,7 +34,7 @@ if not GEMINI_KEYS:
 # =====================================================
 # APP
 # =====================================================
-app = FastAPI(title="Educational AI Backend")
+app = FastAPI(title="Nassr AI Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,10 +53,10 @@ class ActivateRequest(BaseModel):
     code: str
 
 # =====================================================
-# SIMPLE STORAGE (in-memory)
-# ⚠️ للاستعمال الإنتاجي استخدم Redis أو DB
+# STORAGE (مؤقت - in memory)
 # =====================================================
-VALID_CODES = {}  # code_hash : expiration_datetime
+# code_hash -> expires_at
+VALID_CODES = {}
 
 # =====================================================
 # HELPERS
@@ -66,113 +67,107 @@ def pick_gemini_model():
     return genai.GenerativeModel("models/gemini-2.5-flash-lite")
 
 def generate_short_code():
-    return secrets.token_hex(3).upper()  # مثال: A9F3C2
+    return secrets.token_hex(3).upper()
 
 def hash_code(code: str):
     return hashlib.sha256(code.encode()).hexdigest()
 
+def create_jwt(expires_at: datetime):
+    payload = {
+        "type": "activation",
+        "exp": expires_at
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
 def verify_jwt(token: str):
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        if payload.get("type") != "activation":
-            raise HTTPException(status_code=401, detail="Invalid token type")
         return payload
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
+        raise HTTPException(status_code=401, detail="TOKEN_EXPIRED")
     except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="INVALID_TOKEN")
 
 # =====================================================
-# DURATIONS MAP ✅
+# DURATIONS
 # =====================================================
-DURATION_MAP = {
-    "5m":  datetime.timedelta(minutes=5),
-    "30m": datetime.timedelta(minutes=30),
-    "1h":  datetime.timedelta(hours=1),
-    "3h":  datetime.timedelta(hours=3),
-    "1d":  datetime.timedelta(days=1),
-    "3d":  datetime.timedelta(days=3),
-    "7d":  datetime.timedelta(days=7),
-    "1m":  datetime.timedelta(days=30),
-    "3m":  datetime.timedelta(days=90),
-    "5mth": datetime.timedelta(days=150),
+DURATIONS = {
+    "5m": timedelta(minutes=5),
+    "30m": timedelta(minutes=30),
+    "1h": timedelta(hours=1),
+    "3h": timedelta(hours=3),
+    "1d": timedelta(days=1),
+    "3d": timedelta(days=3),
+    "7d": timedelta(days=7),
+    "1m": timedelta(days=30),
+    "3m": timedelta(days=90),
+    "5mth": timedelta(days=150),
 }
 
 # =====================================================
 # ROUTES
 # =====================================================
+
 @app.get("/")
 def health():
     return {
-        "status": "ok",
-        "time": datetime.datetime.utcnow().isoformat()
+        "status": "healthy",
+        "time": datetime.utcnow().isoformat()
     }
 
 # -----------------------------------------------------
-# توليد كود تفعيل (مشرف)
+# توليد كود (مشرف)
 # مثال:
-# /generate-code?key=ADMIN_TOKEN&duration=5m
+# /generate-code?key=ADMIN&duration=5m
 # -----------------------------------------------------
 @app.get("/generate-code")
-def generate_code(
-    key: str = Query(...),
-    duration: str = Query("1d")
-):
+def generate_code(key: str, duration: str):
     if key != ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    if duration not in DURATION_MAP:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid duration. Allowed: {list(DURATION_MAP.keys())}"
-        )
+    if duration not in DURATIONS:
+        raise HTTPException(status_code=400, detail="Invalid duration")
 
-    short_code = generate_short_code()
-    code_hash = hash_code(short_code)
+    code = generate_short_code()
+    code_hash = hash_code(code)
 
-    expires_at = datetime.datetime.utcnow() + DURATION_MAP[duration]
+    expires_at = datetime.utcnow() + DURATIONS[duration]
     VALID_CODES[code_hash] = expires_at
 
     return {
-        "activation_code": short_code,
-        "expires_at": expires_at.isoformat(),
-        "duration": duration
+        "activation_code": code,
+        "duration": duration,
+        "expires_at": expires_at.isoformat() + "Z"
     }
 
 # -----------------------------------------------------
-# تفعيل الأداة (المستخدم)
+# تفعيل كود
 # -----------------------------------------------------
 @app.post("/activate")
 def activate(data: ActivateRequest):
     code = data.code.strip()
     if not code:
-        raise HTTPException(status_code=400, detail="Code required")
+        raise HTTPException(status_code=400, detail="CODE_REQUIRED")
 
     code_hash = hash_code(code)
     expires_at = VALID_CODES.get(code_hash)
 
     if not expires_at:
-        raise HTTPException(status_code=403, detail="Invalid code")
+        raise HTTPException(status_code=403, detail="INVALID_CODE")
 
-    if expires_at < datetime.datetime.utcnow():
+    if expires_at < datetime.utcnow():
         VALID_CODES.pop(code_hash, None)
-        raise HTTPException(status_code=403, detail="Code expired")
+        raise HTTPException(status_code=403, detail="CODE_EXPIRED")
 
-    # JWT ينتهي مع نفس مدة الكود
-    payload = {
-        "type": "activation",
-        "exp": expires_at
-    }
-
-    token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+    token = create_jwt(expires_at)
 
     return {
         "token": token,
-        "expires_at": expires_at.isoformat()
+        "expires_at": expires_at.isoformat() + "Z"
     }
 
 # -----------------------------------------------------
-# تحقق من التفعيل
+# تحقق من التوكن
 # -----------------------------------------------------
 @app.get("/verify")
 def verify(x_token: str = Header(..., alias="X-Token")):
