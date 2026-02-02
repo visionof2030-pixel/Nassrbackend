@@ -88,10 +88,6 @@ class ReportRequest(BaseModel):
     place: Optional[str] = ""
     count: Optional[str] = ""
 
-class GenerateCodeRequest(BaseModel):
-    period: ValidityPeriod = ValidityPeriod.ONE_MONTH
-    custom_days: Optional[int] = None
-
 # =====================================================
 # SIMPLE STORAGE (in-memory)
 # =====================================================
@@ -148,28 +144,37 @@ def verify_jwt(token: str):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-def calculate_expiration(period: ValidityPeriod, custom_days: Optional[int] = None) -> datetime.datetime:
+def calculate_expiration(period: str, custom_days: Optional[int] = None) -> datetime.datetime:
     """حساب وقت انتهاء الصلاحية"""
     now = datetime.datetime.utcnow()
     
     if custom_days and 1 <= custom_days <= 365:
         return now + datetime.timedelta(days=custom_days)
     
-    period_config = VALIDITY_PERIODS[period]
-    
-    if "minutes" in period_config:
-        return now + datetime.timedelta(minutes=period_config["minutes"])
-    elif "hours" in period_config:
-        return now + datetime.timedelta(hours=period_config["hours"])
-    elif "days" in period_config:
-        return now + datetime.timedelta(days=period_config["days"])
+    # البحث عن الفترة في ENUM
+    try:
+        period_enum = ValidityPeriod(period)
+        period_config = VALIDITY_PERIODS[period_enum]
+        
+        if "minutes" in period_config:
+            return now + datetime.timedelta(minutes=period_config["minutes"])
+        elif "hours" in period_config:
+            return now + datetime.timedelta(hours=period_config["hours"])
+        elif "days" in period_config:
+            return now + datetime.timedelta(days=period_config["days"])
+    except:
+        pass
     
     # الافتراضي: شهر واحد
     return now + datetime.timedelta(days=30)
 
-def get_period_name(period: ValidityPeriod) -> str:
+def get_period_name(period: str) -> str:
     """الحصول على اسم الفترة بالعربية"""
-    return VALIDITY_PERIODS[period]["name"]
+    try:
+        period_enum = ValidityPeriod(period)
+        return VALIDITY_PERIODS[period_enum]["name"]
+    except:
+        return "شهر"  # افتراضي
 
 def format_remaining_time(expires_at: datetime.datetime) -> str:
     """تنسيق الوقت المتبقي"""
@@ -206,6 +211,21 @@ def format_remaining_time(expires_at: datetime.datetime) -> str:
             return f"{minutes} دقائق"
     else:
         return "أقل من دقيقة"
+
+def cleanup_expired_codes():
+    """تنظيف الرموز المنتهية الصلاحية"""
+    now = datetime.datetime.utcnow()
+    expired_hashes = []
+    
+    for code_hash, code_data in VALID_CODES.items():
+        if code_data["expires_at"] < now:
+            expired_hashes.append(code_hash)
+    
+    for code_hash in expired_hashes:
+        VALID_CODES.pop(code_hash, None)
+    
+    if expired_hashes:
+        print(f"تم تنظيف {len(expired_hashes)} كود منتهي")
 
 # =====================================================
 # PROFESSIONAL ENHANCEMENT FUNCTIONS
@@ -245,9 +265,6 @@ def add_professional_touch(content: str, field_id: str) -> str:
     
     return content
 
-# =====================================================
-# PROMPT TEMPLATES
-# =====================================================
 def build_educational_prompt(report_data: ReportRequest) -> str:
     """بناء البرومبت التربوي المحترف"""
     
@@ -425,6 +442,52 @@ def health():
     }
 
 # -----------------------------------------------------
+# توليد كود تفعيل مع صلاحية محددة (GET - يجب استخدام GET هنا)
+# -----------------------------------------------------
+@app.get("/generate-code")
+def generate_code(
+    key: str,
+    period: str = "1_month",
+    custom_days: Optional[int] = None
+):
+    """توليد كود تفعيل مع صلاحية محددة"""
+    
+    # التحقق من صلاحية المشرف
+    if key != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    # توليد الكود
+    short_code = generate_short_code()
+    code_hash = hash_code(short_code)
+    
+    # حساب وقت الانتهاء
+    expires_at = calculate_expiration(period, custom_days)
+    
+    # حفظ الكود
+    VALID_CODES[code_hash] = {
+        "expires_at": expires_at,
+        "period": period,
+        "period_name": get_period_name(period),
+        "created_at": datetime.datetime.utcnow(),
+        "custom_days": custom_days
+    }
+    
+    # تنظيف الرموز المنتهية
+    cleanup_expired_codes()
+    
+    return {
+        "activation_code": short_code,
+        "validity_period": {
+            "id": period,
+            "name": get_period_name(period),
+            "expires_at": expires_at.isoformat(),
+            "remaining": format_remaining_time(expires_at)
+        },
+        "expires_in": format_remaining_time(expires_at),
+        "generated_at": datetime.datetime.utcnow().isoformat()
+    }
+
+# -----------------------------------------------------
 # الحصول على خيارات الصلاحيات المتاحة
 # -----------------------------------------------------
 @app.get("/validity-periods")
@@ -444,49 +507,7 @@ def get_validity_periods():
     }
 
 # -----------------------------------------------------
-# توليد كود تفعيل مع صلاحية محددة
-# -----------------------------------------------------
-@app.post("/generate-code")
-def generate_code(data: GenerateCodeRequest, key: str = None):
-    """توليد كود تفعيل مع صلاحية محددة"""
-    
-    # التحقق من صلاحية المشرف
-    if key != ADMIN_TOKEN:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    
-    # توليد الكود
-    short_code = generate_short_code()
-    code_hash = hash_code(short_code)
-    
-    # حساب وقت الانتهاء
-    expires_at = calculate_expiration(data.period, data.custom_days)
-    
-    # حفظ الكود
-    VALID_CODES[code_hash] = {
-        "expires_at": expires_at,
-        "period": data.period.value,
-        "period_name": get_period_name(data.period),
-        "created_at": datetime.datetime.utcnow(),
-        "custom_days": data.custom_days
-    }
-    
-    # تنظيف الرموز المنتهية
-    cleanup_expired_codes()
-    
-    return {
-        "activation_code": short_code,
-        "validity_period": {
-            "id": data.period.value,
-            "name": get_period_name(data.period),
-            "expires_at": expires_at.isoformat(),
-            "remaining": format_remaining_time(expires_at)
-        },
-        "expires_in": format_remaining_time(expires_at),
-        "generated_at": datetime.datetime.utcnow().isoformat()
-    }
-
-# -----------------------------------------------------
-# تفعيل الأداة (المستخدم)
+# تفعيل الأداة (المستخدم) - POST
 # -----------------------------------------------------
 @app.post("/activate")
 def activate(data: ActivateRequest):
@@ -541,90 +562,6 @@ def verify(x_token: str = Header(..., alias="X-Token")):
             "period": payload.get("code_period", "unknown"),
             "expires_at": datetime.datetime.fromtimestamp(payload["exp"]).isoformat()
         }
-    }
-
-# -----------------------------------------------------
-# الحصول على معلومات الكود
-# -----------------------------------------------------
-@app.get("/code-info/{code}")
-def get_code_info(code: str, admin_key: str = None):
-    """الحصول على معلومات الكود (للمشرف فقط)"""
-    
-    if admin_key != ADMIN_TOKEN:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    
-    code_hash = hash_code(code.strip())
-    code_data = VALID_CODES.get(code_hash)
-    
-    if not code_data:
-        return {"exists": False, "message": "الكود غير موجود"}
-    
-    expires_at = code_data["expires_at"]
-    is_expired = expires_at < datetime.datetime.utcnow()
-    
-    return {
-        "exists": True,
-        "code": code.strip(),
-        "validity": {
-            "period": code_data["period_name"],
-            "created_at": code_data["created_at"].isoformat(),
-            "expires_at": expires_at.isoformat(),
-            "is_expired": is_expired,
-            "remaining": format_remaining_time(expires_at)
-        },
-        "status": "منتهي" if is_expired else "نشط"
-    }
-
-# -----------------------------------------------------
-# تنظيف الرموز المنتهية
-# -----------------------------------------------------
-def cleanup_expired_codes():
-    """تنظيف الرموز المنتهية الصلاحية"""
-    now = datetime.datetime.utcnow()
-    expired_hashes = []
-    
-    for code_hash, code_data in VALID_CODES.items():
-        if code_data["expires_at"] < now:
-            expired_hashes.append(code_hash)
-    
-    for code_hash in expired_hashes:
-        VALID_CODES.pop(code_hash, None)
-    
-    if expired_hashes:
-        print(f"تم تنظيف {len(expired_hashes)} كود منتهي")
-
-# -----------------------------------------------------
-# إحصائيات الرموز
-# -----------------------------------------------------
-@app.get("/code-stats")
-def get_code_stats(admin_key: str):
-    """الحصول على إحصائيات الرموز (للمشرف فقط)"""
-    
-    if admin_key != ADMIN_TOKEN:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    
-    now = datetime.datetime.utcnow()
-    active_codes = 0
-    expired_codes = 0
-    period_stats = {}
-    
-    for code_data in VALID_CODES.values():
-        if code_data["expires_at"] < now:
-            expired_codes += 1
-        else:
-            active_codes += 1
-        
-        period = code_data["period"]
-        period_stats[period] = period_stats.get(period, 0) + 1
-    
-    cleanup_expired_codes()
-    
-    return {
-        "total_codes": len(VALID_CODES),
-        "active_codes": active_codes,
-        "expired_codes": expired_codes,
-        "period_distribution": period_stats,
-        "last_cleanup": now.isoformat()
     }
 
 # -----------------------------------------------------
@@ -693,14 +630,6 @@ def generate_v2(data: dict, x_token: str = Header(..., alias="X-Token")):
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-# -----------------------------------------------------
-# وظيفة تنظيف دورية
-# -----------------------------------------------------
-@app.on_event("startup")
-def startup_event():
-    """تنظيف الرموز المنتهية عند بدء التشغيل"""
-    cleanup_expired_codes()
 
 if __name__ == "__main__":
     import uvicorn
