@@ -72,6 +72,29 @@ class ReportRequest(BaseModel):
 VALID_CODES = {}  # code_hash: expiration_datetime
 
 # =====================================================
+# PROFESSIONAL PHRASES (من الفرونت إند السابق)
+# =====================================================
+PROFESSIONAL_PHRASES = [
+    'مع التركيز على تحقيق أهداف التعلم وتنمية المهارات الأساسية',
+    'بما يسهم في رفع مستوى التحصيل الدراسي وتحسين المخرجات التعليمية',
+    'وذلك لتحقيق التكامل بين الجوانب المعرفية والمهارية والوجدانية',
+    'مع مراعاة الفروق الفردية وتنويع أساليب التدريس لتناسب جميع الطلاب',
+    'لضمان تحقيق رؤية التعليم وتطوير العملية التعليمية بصورة شاملة',
+    'مع الاستفادة من أفضل الممارسات التربوية والتقنيات التعليمية الحديثة',
+    'بما يعزز من دور المعلم كميسر للتعلم وموجه للطالب نحو التميز'
+]
+
+PROFESSIONAL_ADDITIONS = {
+    'goal': ' بما يعزز من جودة التعليم ويدعم تحقيق رؤية المدرسة التعليمية',
+    'summary': ' مع التركيز على الأثر الإيجابي في تحسين الممارسات التعليمية',
+    'steps': ' ومراعاة الجوانب التربوية والنفسية للطلاب في جميع المراحل',
+    'strategies': ' بما يناسب البيئة الصفية ويحقق أقصى استفادة تعليمية',
+    'strengths': ' مما يسهم في تحقيق بيئة تعلم إيجابية ومنتجة',
+    'improve': ' مع وضع خطط تطويرية قابلة للتنفيذ في الفصول القادمة',
+    'recomm': ' بما يدعم التطوير المهني المستمر ويعزز جودة التعليم'
+}
+
+# =====================================================
 # HELPERS
 # =====================================================
 def pick_gemini_model():
@@ -97,7 +120,45 @@ def verify_jwt(token: str):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # =====================================================
-# PROMPT TEMPLATES (المحفوظة من الفرونت إند)
+# PROFESSIONAL ENHANCEMENT FUNCTIONS (من الفرونت إند السابق)
+# =====================================================
+def ensure_word_count(content: str, target_words: int = 25) -> str:
+    """تأكيد عدد الكلمات مع لمسة مهنية"""
+    words = content.split()
+    
+    if len(words) >= target_words - 5 and len(words) <= target_words + 5:
+        return content
+    
+    if len(words) < target_words - 5:
+        extended_content = content
+        while len(extended_content.split()) < target_words:
+            random_phrase = random.choice(PROFESSIONAL_PHRASES)
+            extended_content += ' ' + random_phrase
+        
+        extended_words = extended_content.split()
+        if len(extended_words) > target_words + 5:
+            return ' '.join(extended_words[:target_words])
+        
+        return extended_content
+    
+    if len(words) > target_words + 5:
+        return ' '.join(words[:target_words])
+    
+    return content
+
+def add_professional_touch(content: str, field_id: str) -> str:
+    """إضافة لمسة مهنية للمحتوى"""
+    words = content.split()
+    if len(words) >= 20:
+        return content
+    
+    if field_id in PROFESSIONAL_ADDITIONS:
+        return content + PROFESSIONAL_ADDITIONS[field_id]
+    
+    return content
+
+# =====================================================
+# PROMPT TEMPLATES (من الفرونت إند السابق)
 # =====================================================
 def build_educational_prompt(report_data: ReportRequest) -> str:
     """بناء البرومبت التربوي المحترف"""
@@ -168,9 +229,9 @@ def build_educational_prompt(report_data: ReportRequest) -> str:
     return prompt
 
 def post_process_response(response_text: str) -> str:
-    """معالجة النتيجة للتأكد من التنسيق الصحيح"""
+    """معالجة النتيجة مع التحسينات المهنية"""
     
-    # قائمة عناوين الحقول لإزالتها
+    # قائمة عناوين الحقول لإزالتها (من removeFieldTitles())
     field_titles = [
         'الهدف التربوي', 'الهدف التربوي', 
         'نبذة مختصرة', 'نبذة مختصرة', 
@@ -187,41 +248,77 @@ def post_process_response(response_text: str) -> str:
     lines = response_text.split('\n')
     processed_lines = []
     
+    field_mapping = {
+        1: 'goal',
+        2: 'summary',
+        3: 'steps',
+        4: 'strategies',
+        5: 'strengths',
+        6: 'improve',
+        7: 'recomm'
+    }
+    
+    current_field = 1
+    
     for line in lines:
         cleaned_line = line.strip()
         
-        # إذا كان السطر يبدأ برقم (1. 2. إلخ) فاحتفظ به
-        if cleaned_line and cleaned_line[0].isdigit():
-            # إزالة أي عناوين حقل من البداية
+        if cleaned_line:
+            # إذا كان السطر يبدأ برقم
+            if cleaned_line[0].isdigit():
+                match = None
+                # البحث عن النمط 1. أو 1) أو 1-
+                for pattern in ['. ', ') ', '- ']:
+                    if pattern in cleaned_line:
+                        parts = cleaned_line.split(pattern, 1)
+                        if parts[0].isdigit():
+                            current_field = int(parts[0])
+                            content = parts[1] if len(parts) > 1 else ""
+                            match = (current_field, content)
+                            break
+                
+                if not match:
+                    # محاولة استخراج الرقم من البداية
+                    import re
+                    match_num = re.match(r'^(\d+)\s*(.*)', cleaned_line)
+                    if match_num:
+                        current_field = int(match_num.group(1))
+                        content = match_num.group(2)
+                        match = (current_field, content)
+            
+            # إذا لم نجد رقماً، نستخدم الرقم الحالي
+            if not match:
+                content = cleaned_line
+            else:
+                _, content = match
+            
+            # إزالة عناوين الحقول
             for title in field_titles:
                 title_lower = title.lower()
-                if cleaned_line.lower().startswith(title_lower):
+                content_lower = content.lower()
+                if content_lower.startswith(title_lower):
                     # إزالة العنوان مع أي علامات ترقيم بعده
-                    pattern = f"^{title}[:\\.\\-]?\\s*"
                     import re
-                    cleaned_line = re.sub(pattern, '', cleaned_line, flags=re.IGNORECASE)
+                    pattern = f"^{title}[:\\.\\-]?\\s*"
+                    content = re.sub(pattern, '', content, flags=re.IGNORECASE)
                     break
             
-            processed_lines.append(cleaned_line.strip())
-        elif cleaned_line and any(field in cleaned_line for field in ['1', '2', '3', '4', '5', '6', '7']):
-            # إذا كان يحتوي على رقم في أي مكان (بدون نقطة)
-            processed_lines.append(cleaned_line)
+            # تطبيق التحسينات المهنية
+            if 1 <= current_field <= 7:
+                field_id = field_mapping[current_field]
+                content = ensure_word_count(content, 25)
+                content = add_professional_touch(content, field_id)
+                processed_lines.append(f"{current_field}. {content}")
+                current_field += 1
     
-    # إذا لم نجد أي سطور مرقمة، نقسم النص إلى جمل ونضيف أرقام
-    if not any(line and line[0].isdigit() for line in processed_lines):
-        sentences = [s.strip() for s in response_text.split('.') if s.strip()]
-        processed_lines = []
-        for i, sentence in enumerate(sentences[:7], 1):
-            cleaned = sentence
-            for title in field_titles:
-                if title in cleaned:
-                    cleaned = cleaned.replace(title, '').strip()
-            processed_lines.append(f"{i}. {cleaned}")
-    
-    # التأكد من وجود 7 حقول
-    while len(processed_lines) < 7:
-        last_line = processed_lines[-1] if processed_lines else "استكمالًا للجهود التربوية."
-        processed_lines.append(f"{len(processed_lines) + 1}. {last_line}")
+    # التأكد من وجود 7 حقول (من fallbackProfessionalAIParsing())
+    if len(processed_lines) < 7:
+        while len(processed_lines) < 7:
+            field_id = field_mapping[len(processed_lines) + 1]
+            default_content = "استكمالًا للجهود التربوية والتعليمية."
+            content = ensure_word_count(default_content, 25)
+            content = add_professional_touch(content, field_id)
+            processed_lines.append(f"{len(processed_lines) + 1}. {content}")
     
     # اقتطاع إلى 7 حقول فقط
     processed_lines = processed_lines[:7]
@@ -325,7 +422,7 @@ def generate_report(data: ReportRequest, x_token: str = Header(..., alias="X-Tok
         model = pick_gemini_model()
         response = model.generate_content(prompt)
         
-        # 3. معالجة النتيجة
+        # 3. معالجة النتيجة مع جميع التحسينات
         processed_response = post_process_response(response.text)
         
         return {
@@ -360,7 +457,7 @@ def generate_v2(data: dict, x_token: str = Header(..., alias="X-Token")):
         model = pick_gemini_model()
         response = model.generate_content(prompt)
         
-        # إذا كان طلب تقرير، قم بمعالجته
+        # إذا كان طلب تقرير، قم بمعالجته مع جميع التحسينات
         if "report_type" in data:
             processed_response = post_process_response(response.text)
             return {"answer": processed_response}
