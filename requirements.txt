@@ -2,4 +2,3 @@ fastapi
 uvicorn
 pyjwt
 google-generativeai
-python-doteny
