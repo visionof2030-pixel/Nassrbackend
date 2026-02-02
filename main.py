@@ -1,12 +1,15 @@
 import os
 import random
 import datetime
+import hashlib
+import secrets
 import jwt
 import google.generativeai as genai
 
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 
 # =====================================================
 # ENV
@@ -14,8 +17,8 @@ from pydantic import BaseModel
 JWT_SECRET = os.getenv("JWT_SECRET")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 
-if not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET missing")
+if not JWT_SECRET or not ADMIN_TOKEN:
+    raise RuntimeError("JWT_SECRET or ADMIN_TOKEN missing")
 
 # 7 مفاتيح Gemini
 GEMINI_KEYS = [
@@ -30,7 +33,7 @@ GEMINI_KEYS = [
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 
 if not GEMINI_KEYS:
-    raise RuntimeError("No Gemini API keys found")
+    raise RuntimeError("No Gemini API Keys found")
 
 # =====================================================
 # APP
@@ -47,14 +50,26 @@ app.add_middleware(
 # =====================================================
 # MODELS
 # =====================================================
-class GenerateRequest(BaseModel):
+class AskRequest(BaseModel):
+    prompt: str
+
+class ActivateRequest(BaseModel):
+    code: str
+
+class ReportRequest(BaseModel):
     report_type: str
-    subject: str | None = ""
-    lesson: str | None = ""
-    grade: str | None = ""
-    target: str | None = ""
-    place: str | None = ""
-    count: str | None = ""
+    subject: Optional[str] = ""
+    lesson: Optional[str] = ""
+    grade: Optional[str] = ""
+    target: Optional[str] = ""
+    place: Optional[str] = ""
+    count: Optional[str] = ""
+
+# =====================================================
+# SIMPLE STORAGE (in-memory)
+# ⚠️ يمكن لاحقًا استبداله Redis أو DB
+# =====================================================
+VALID_CODES = {}  # code_hash: expiration_datetime
 
 # =====================================================
 # HELPERS
@@ -63,6 +78,12 @@ def pick_gemini_model():
     key = random.choice(GEMINI_KEYS)
     genai.configure(api_key=key)
     return genai.GenerativeModel("models/gemini-2.5-flash-lite")
+
+def generate_short_code():
+    return secrets.token_hex(3).upper()  # مثال: A9F3C2
+
+def hash_code(code: str):
+    return hashlib.sha256(code.encode()).hexdigest()
 
 def verify_jwt(token: str):
     try:
@@ -76,66 +97,136 @@ def verify_jwt(token: str):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # =====================================================
-# 🔥 ALL PROMPTS (هنا الذكاء بالكامل)
+# PROMPT TEMPLATES (المحفوظة من الفرونت إند)
 # =====================================================
+def build_educational_prompt(report_data: ReportRequest) -> str:
+    """بناء البرومبت التربوي المحترف"""
+    
+    prompt_template = """أنت خبير تربوي تعليمي محترف تمتلك خبرة ميدانية واسعة في التعليم العام.  
+اعتمد منظورًا تربويًا مهنيًا احترافيًا يركّز على تحسين جودة التعليم، ودعم المعلم، وتعزيز بيئة التعلّم، وخدمة القيادة المدرسية.  
 
-BASE_SYSTEM_PROMPT = """
-أنت خبير تربوي تعليمي محترف تمتلك خبرة ميدانية واسعة في التعليم العام داخل المدارس.
-تكتب التقارير التربوية بلغة عربية فصحى سليمة، مهنية، دقيقة، ومتزنة.
-تراعي واقع الميدان التعليمي وسياق المدرسة السعودية.
-تركّز على جودة التعليم، تطوير أداء attaching المعلم، وتحسين نواتج التعلّم.
-"""
+التقرير المطلوب: "{report_type}"
+{subject_section}{lesson_section}{grade_section}{target_section}{place_section}{count_section}
 
-CONTENT_RULES_PROMPT = """
-قواعد إلزامية:
-- لا تذكر عناوين الحقول داخل النص.
-- لا تبدأ بجمل تمهيدية مثل: الهدف التربوي هو.
-- اكتب بصيغة تقريرية مهنية وكأن التقرير صادر عن المعلم.
-- طول كل فقرة يقارب 25 كلمة.
-- تجنب الحشو والتكرار.
-- اربط المحتوى بالمادة والدرس والبيئة الصفية عند توفرها.
-"""
+**توجيهات مهنية:**
+- كن موضوعيًا ومتزنًا وبنّاءً  
+- قدّم الملاحظات بصيغة تطويرية غير نقدية  
+- راعِ واقع الميدان التعليمي وسياق المدرسة  
+- اربط بين المعلم والطالب والمنهج والبيئة الصفية والقيادة المدرسية  
+- ركّز على جودة التعليم وأثر الممارسات على تعلم الطلاب  
+- التزم بلغة عربية فصيحة سليمة وخالية من الأخطاء  
 
-FIELDS_PROMPT = """
-الحقول المطلوبة بالترتيب:
+**شروط المحتوى:**
+اكتب محتوى كل حقل بصيغة تقريرية مهنية وكأنه صادر عن المعلم.
+لا تكتب أبداً عنوان الحقل داخل المحتوى ولا تعِد صياغته بصيغة مباشرة (مثل: الهدف التربوي هو، النبذة المختصرة).
+يجب أن يحتوي كل حقل على ما يقارب 25 كلمة.
+ابدأ بالمضمون مباشرة دون تمهيد أو عبارات إنشائية.
+يمكن الاستفادة من معنى العنوان أو أحد مفاهيمه بشكل غير مباشر فقط عند الحاجة وبما يخدم الفكرة دون تكرار أو حشو.
+احرص على وجود ترابط منطقي بين الأهداف، النبذة المختصرة، الاستراتيجيات، إجراءات التنفيذ، نقاط القوة، نقاط التحسين، والتوصيات.
+اربط المحتوى بالمادة الدراسية وعنوان الدرس إن وُجد، وكذلك بمكان التنفيذ، بأسلوب مهني متوازن يجمع بين الإشارة المباشرة وغير المباشرة دون تكلف.
+اجعل الهدف النهائي للمحتوى تحسين الممارسة التعليمية ودعم التطوير المهني المستدام.
+راعِ الوضوح والترابط، واجعل كل جملة تضيف قيمة تعليمية فعلية.
+
+**الحقول المطلوبة:**
 1. الهدف التربوي
-2. نبذة مختصرة
+2. نبذة مختصرة  
 3. إجراءات التنفيذ
 4. الاستراتيجيات
 5. نقاط القوة
 6. نقاط التحسين
 7. التوصيات
 
-اكتب كل حقل في سطر مستقل يبدأ برقمه فقط.
-"""
+يرجى تقديم الإجابة باللغة العربية الفصحى، وتنظيمها بحيث يكون كل حقل في سطر منفصل يبدأ برقمه فقط دون ذكر العنوان."""
+    
+    # بناء أقسام البيانات
+    sections = []
+    if report_data.subject:
+        sections.append(f"المادة: {report_data.subject}")
+    if report_data.lesson:
+        sections.append(f"الدرس: {report_data.lesson}")
+    if report_data.grade:
+        sections.append(f"الصف: {report_data.grade}")
+    if report_data.target:
+        sections.append(f"المستهدفون: {report_data.target}")
+    if report_data.place:
+        sections.append(f"مكان التنفيذ: {report_data.place}")
+    if report_data.count:
+        sections.append(f"عدد الحضور: {report_data.count}")
+    
+    data_section = "\n".join(sections)
+    
+    prompt = prompt_template.format(
+        report_type=report_data.report_type,
+        subject_section=f"{report_data.subject}\n" if report_data.subject else "",
+        lesson_section=f"{report_data.lesson}\n" if report_data.lesson else "",
+        grade_section=f"{report_data.grade}\n" if report_data.grade else "",
+        target_section=f"{report_data.target}\n" if report_data.target else "",
+        place_section=f"{report_data.place}\n" if report_data.place else "",
+        count_section=f"{report_data.count}\n" if report_data.count else "",
+    )
+    
+    return prompt
 
-def build_prompt(data: GenerateRequest) -> str:
-    context = f"""
-نوع التقرير: {data.report_type}
-"""
-    if data.subject:
-        context += f"\nالمادة: {data.subject}"
-    if data.lesson:
-        context += f"\nالدرس: {data.lesson}"
-    if data.grade:
-        context += f"\nالصف: {data.grade}"
-    if data.target:
-        context += f"\nالمستهدفون: {data.target}"
-    if data.place:
-        context += f"\nمكان التنفيذ: {data.place}"
-    if data.count:
-        context += f"\nعدد الحضور: {data.count}"
-
-    final_prompt = f"""
-{BASE_SYSTEM_PROMPT}
-
-{context}
-
-{CONTENT_RULES_PROMPT}
-
-{FIELDS_PROMPT}
-"""
-    return final_prompt.strip()
+def post_process_response(response_text: str) -> str:
+    """معالجة النتيجة للتأكد من التنسيق الصحيح"""
+    
+    # قائمة عناوين الحقول لإزالتها
+    field_titles = [
+        'الهدف التربوي', 'الهدف التربوي', 
+        'نبذة مختصرة', 'نبذة مختصرة', 
+        'إجراءات التنفيذ', 'إجراءات التنفيذ', 
+        'الاستراتيجيات', 'الاستراتيجيات',
+        'نقاط القوة', 'نقاط القوة',
+        'نقاط التحسين', 'نقاط تحسين',
+        'التوصيات', 'التوصيات',
+        'هو:', 'تشمل:', 'تشمل', 'يتضمن:', 'يتضمن',
+        'يتمثل في', 'يتمثل', 'يمثل', 'يتم',
+        'يشمل', 'تحتوي', 'تتضمن'
+    ]
+    
+    lines = response_text.split('\n')
+    processed_lines = []
+    
+    for line in lines:
+        cleaned_line = line.strip()
+        
+        # إذا كان السطر يبدأ برقم (1. 2. إلخ) فاحتفظ به
+        if cleaned_line and cleaned_line[0].isdigit():
+            # إزالة أي عناوين حقل من البداية
+            for title in field_titles:
+                title_lower = title.lower()
+                if cleaned_line.lower().startswith(title_lower):
+                    # إزالة العنوان مع أي علامات ترقيم بعده
+                    pattern = f"^{title}[:\\.\\-]?\\s*"
+                    import re
+                    cleaned_line = re.sub(pattern, '', cleaned_line, flags=re.IGNORECASE)
+                    break
+            
+            processed_lines.append(cleaned_line.strip())
+        elif cleaned_line and any(field in cleaned_line for field in ['1', '2', '3', '4', '5', '6', '7']):
+            # إذا كان يحتوي على رقم في أي مكان (بدون نقطة)
+            processed_lines.append(cleaned_line)
+    
+    # إذا لم نجد أي سطور مرقمة، نقسم النص إلى جمل ونضيف أرقام
+    if not any(line and line[0].isdigit() for line in processed_lines):
+        sentences = [s.strip() for s in response_text.split('.') if s.strip()]
+        processed_lines = []
+        for i, sentence in enumerate(sentences[:7], 1):
+            cleaned = sentence
+            for title in field_titles:
+                if title in cleaned:
+                    cleaned = cleaned.replace(title, '').strip()
+            processed_lines.append(f"{i}. {cleaned}")
+    
+    # التأكد من وجود 7 حقول
+    while len(processed_lines) < 7:
+        last_line = processed_lines[-1] if processed_lines else "استكمالًا للجهود التربوية."
+        processed_lines.append(f"{len(processed_lines) + 1}. {last_line}")
+    
+    # اقتطاع إلى 7 حقول فقط
+    processed_lines = processed_lines[:7]
+    
+    return "\n".join(processed_lines)
 
 # =====================================================
 # ROUTES
@@ -148,21 +239,137 @@ def health():
         "time": datetime.datetime.utcnow().isoformat()
     }
 
+# -----------------------------------------------------
+# توليد كود تفعيل (مشرف فقط)
+# -----------------------------------------------------
+@app.get("/generate-code")
+def generate_code(key: str):
+    if key != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    short_code = generate_short_code()
+    code_hash = hash_code(short_code)
+
+    expires_at = datetime.datetime.utcnow() + datetime.timedelta(days=30)
+    VALID_CODES[code_hash] = expires_at
+
+    return {
+        "activation_code": short_code,
+        "expires_in": "30 days"
+    }
+
+# -----------------------------------------------------
+# تفعيل الأداة (المستخدم)
+# -----------------------------------------------------
+@app.post("/activate")
+def activate(data: ActivateRequest):
+    code = data.code.strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="Code required")
+
+    code_hash = hash_code(code)
+    expires_at = VALID_CODES.get(code_hash)
+
+    if not expires_at:
+        raise HTTPException(status_code=403, detail="Invalid code")
+
+    if expires_at < datetime.datetime.utcnow():
+        VALID_CODES.pop(code_hash, None)
+        raise HTTPException(status_code=403, detail="Code expired")
+
+    # إصدار JWT استخدام
+    payload = {
+        "type": "activation",
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(days=30)
+    }
+
+    token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+    return {"token": token}
+
+# -----------------------------------------------------
+# تحقق من التفعيل
+# -----------------------------------------------------
+@app.get("/verify")
+def verify(x_token: str = Header(..., alias="X-Token")):
+    verify_jwt(x_token)
+    return {"status": "ok"}
+
+# -----------------------------------------------------
+# الذكاء الاصطناعي - الطريقة القديمة (للتوافق)
+# -----------------------------------------------------
 @app.post("/generate")
-def generate(
-    data: GenerateRequest,
-    x_token: str = Header(..., alias="X-Token")
-):
+def generate(data: AskRequest, x_token: str = Header(..., alias="X-Token")):
     verify_jwt(x_token)
 
     try:
         model = pick_gemini_model()
-        prompt = build_prompt(data)
-        response = model.generate_content(prompt)
-
-        return {
-            "answer": response.text
-        }
-
+        response = model.generate_content(data.prompt)
+        return {"answer": response.text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# -----------------------------------------------------
+# الذكاء الاصطناعي للتقرير التربوي (الجديد)
+# -----------------------------------------------------
+@app.post("/generate-report")
+def generate_report(data: ReportRequest, x_token: str = Header(..., alias="X-Token")):
+    """توليد تقرير تربوي كامل"""
+    verify_jwt(x_token)
+    
+    try:
+        # 1. بناء البرومبت التربوي
+        prompt = build_educational_prompt(data)
+        
+        # 2. استدعاء نموذج Gemini
+        model = pick_gemini_model()
+        response = model.generate_content(prompt)
+        
+        # 3. معالجة النتيجة
+        processed_response = post_process_response(response.text)
+        
+        return {
+            "answer": processed_response,
+            "report_type": data.report_type,
+            "generated_at": datetime.datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"خطأ في توليد التقرير: {str(e)}")
+
+# -----------------------------------------------------
+# تحديث نقطة النهاية القديمة لدعم كلا الطريقتين
+# -----------------------------------------------------
+@app.post("/v2/generate")
+def generate_v2(data: dict, x_token: str = Header(..., alias="X-Token")):
+    """نسخة متوافقة مع الفرونت إند الجديد"""
+    verify_jwt(x_token)
+    
+    try:
+        # الطريقة الجديدة: إذا كان يحتوي على بيانات التقرير
+        if "report_type" in data:
+            report_data = ReportRequest(**data)
+            prompt = build_educational_prompt(report_data)
+        else:
+            # الطريقة القديمة: إذا كان يحتوي على prompt مباشر
+            prompt = data.get("prompt", "")
+        
+        if not prompt:
+            raise HTTPException(status_code=400, detail="No prompt provided")
+        
+        model = pick_gemini_model()
+        response = model.generate_content(prompt)
+        
+        # إذا كان طلب تقرير، قم بمعالجته
+        if "report_type" in data:
+            processed_response = post_process_response(response.text)
+            return {"answer": processed_response}
+        else:
+            return {"answer": response.text}
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
