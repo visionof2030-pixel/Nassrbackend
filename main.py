@@ -563,12 +563,9 @@ def activate(data: ActivateRequest):
     
     return {
         "token": token,
-        "validity_info": {
-            "period": code_data["period_name"],
-            "user_duration": duration,
-            "expires_at": (datetime.datetime.utcnow() + delta).isoformat(),
-            "remaining": format_remaining_time(datetime.datetime.utcnow() + delta)
-        }
+        "expires_at": (datetime.datetime.utcnow() + delta).isoformat(),
+        "expires_in_seconds": int(delta.total_seconds()),
+        "duration": duration
     }
 
 # -----------------------------------------------------
