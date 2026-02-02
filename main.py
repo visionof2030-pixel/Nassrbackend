@@ -9,7 +9,8 @@ import google.generativeai as genai
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Dict, Any
+from enum import Enum
 
 # =====================================================
 # ENV
@@ -48,6 +49,28 @@ app.add_middleware(
 )
 
 # =====================================================
+# ENUMS & CONSTANTS
+# =====================================================
+class ValidityPeriod(str, Enum):
+    HALF_HOUR = "30_min"
+    ONE_HOUR = "1_hour"
+    ONE_DAY = "1_day"
+    THREE_DAYS = "3_days"
+    ONE_WEEK = "1_week"
+    ONE_MONTH = "1_month"
+    THREE_MONTHS = "3_months"
+
+VALIDITY_PERIODS = {
+    ValidityPeriod.HALF_HOUR: {"name": "نصف ساعة", "minutes": 30},
+    ValidityPeriod.ONE_HOUR: {"name": "ساعة واحدة", "hours": 1},
+    ValidityPeriod.ONE_DAY: {"name": "يوم واحد", "days": 1},
+    ValidityPeriod.THREE_DAYS: {"name": "٣ أيام", "days": 3},
+    ValidityPeriod.ONE_WEEK: {"name": "أسبوع", "days": 7},
+    ValidityPeriod.ONE_MONTH: {"name": "شهر", "days": 30},
+    ValidityPeriod.THREE_MONTHS: {"name": "٣ أشهر", "days": 90},
+}
+
+# =====================================================
 # MODELS
 # =====================================================
 class AskRequest(BaseModel):
@@ -65,14 +88,17 @@ class ReportRequest(BaseModel):
     place: Optional[str] = ""
     count: Optional[str] = ""
 
-# =====================================================
-# SIMPLE STORAGE (in-memory)
-# ⚠️ يمكن لاحقًا استبداله Redis أو DB
-# =====================================================
-VALID_CODES = {}  # code_hash: expiration_datetime
+class GenerateCodeRequest(BaseModel):
+    period: ValidityPeriod = ValidityPeriod.ONE_MONTH
+    custom_days: Optional[int] = None
 
 # =====================================================
-# PROFESSIONAL PHRASES (من الفرونت إند السابق)
+# SIMPLE STORAGE (in-memory)
+# =====================================================
+VALID_CODES: Dict[str, Dict[str, Any]] = {}  # code_hash: {expires_at, period, created_at}
+
+# =====================================================
+# PROFESSIONAL PHRASES
 # =====================================================
 PROFESSIONAL_PHRASES = [
     'مع التركيز على تحقيق أهداف التعلم وتنمية المهارات الأساسية',
@@ -103,12 +129,15 @@ def pick_gemini_model():
     return genai.GenerativeModel("models/gemini-2.5-flash-lite")
 
 def generate_short_code():
+    """توليد كود تفعيل قصير"""
     return secrets.token_hex(3).upper()  # مثال: A9F3C2
 
 def hash_code(code: str):
+    """تجزئة الكود للتخزين الآمن"""
     return hashlib.sha256(code.encode()).hexdigest()
 
 def verify_jwt(token: str):
+    """التحقق من صحة JWT"""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         if payload.get("type") != "activation":
@@ -119,8 +148,67 @@ def verify_jwt(token: str):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+def calculate_expiration(period: ValidityPeriod, custom_days: Optional[int] = None) -> datetime.datetime:
+    """حساب وقت انتهاء الصلاحية"""
+    now = datetime.datetime.utcnow()
+    
+    if custom_days and 1 <= custom_days <= 365:
+        return now + datetime.timedelta(days=custom_days)
+    
+    period_config = VALIDITY_PERIODS[period]
+    
+    if "minutes" in period_config:
+        return now + datetime.timedelta(minutes=period_config["minutes"])
+    elif "hours" in period_config:
+        return now + datetime.timedelta(hours=period_config["hours"])
+    elif "days" in period_config:
+        return now + datetime.timedelta(days=period_config["days"])
+    
+    # الافتراضي: شهر واحد
+    return now + datetime.timedelta(days=30)
+
+def get_period_name(period: ValidityPeriod) -> str:
+    """الحصول على اسم الفترة بالعربية"""
+    return VALIDITY_PERIODS[period]["name"]
+
+def format_remaining_time(expires_at: datetime.datetime) -> str:
+    """تنسيق الوقت المتبقي"""
+    now = datetime.datetime.utcnow()
+    if expires_at < now:
+        return "منتهي"
+    
+    diff = expires_at - now
+    
+    if diff.days > 0:
+        if diff.days == 1:
+            return "يوم واحد"
+        elif diff.days == 2:
+            return "يومين"
+        elif diff.days <= 10:
+            return f"{diff.days} أيام"
+        else:
+            return f"{diff.days} يوم"
+    elif diff.seconds >= 3600:
+        hours = diff.seconds // 3600
+        if hours == 1:
+            return "ساعة واحدة"
+        elif hours == 2:
+            return "ساعتين"
+        else:
+            return f"{hours} ساعات"
+    elif diff.seconds >= 60:
+        minutes = diff.seconds // 60
+        if minutes == 1:
+            return "دقيقة واحدة"
+        elif minutes == 2:
+            return "دقيقتين"
+        else:
+            return f"{minutes} دقائق"
+    else:
+        return "أقل من دقيقة"
+
 # =====================================================
-# PROFESSIONAL ENHANCEMENT FUNCTIONS (من الفرونت إند السابق)
+# PROFESSIONAL ENHANCEMENT FUNCTIONS
 # =====================================================
 def ensure_word_count(content: str, target_words: int = 25) -> str:
     """تأكيد عدد الكلمات مع لمسة مهنية"""
@@ -158,7 +246,7 @@ def add_professional_touch(content: str, field_id: str) -> str:
     return content
 
 # =====================================================
-# PROMPT TEMPLATES (من الفرونت إند السابق)
+# PROMPT TEMPLATES
 # =====================================================
 def build_educational_prompt(report_data: ReportRequest) -> str:
     """بناء البرومبت التربوي المحترف"""
@@ -231,7 +319,7 @@ def build_educational_prompt(report_data: ReportRequest) -> str:
 def post_process_response(response_text: str) -> str:
     """معالجة النتيجة مع التحسينات المهنية"""
     
-    # قائمة عناوين الحقول لإزالتها (من removeFieldTitles())
+    # قائمة عناوين الحقول لإزالتها
     field_titles = [
         'الهدف التربوي', 'الهدف التربوي', 
         'نبذة مختصرة', 'نبذة مختصرة', 
@@ -311,7 +399,7 @@ def post_process_response(response_text: str) -> str:
                 processed_lines.append(f"{current_field}. {content}")
                 current_field += 1
     
-    # التأكد من وجود 7 حقول (من fallbackProfessionalAIParsing())
+    # التأكد من وجود 7 حقول
     if len(processed_lines) < 7:
         while len(processed_lines) < 7:
             field_id = field_mapping[len(processed_lines) + 1]
@@ -337,22 +425,64 @@ def health():
     }
 
 # -----------------------------------------------------
-# توليد كود تفعيل (مشرف فقط)
+# الحصول على خيارات الصلاحيات المتاحة
 # -----------------------------------------------------
-@app.get("/generate-code")
-def generate_code(key: str):
+@app.get("/validity-periods")
+def get_validity_periods():
+    """الحصول على قائمة فترات الصلاحية المتاحة"""
+    periods = []
+    for period_key, period_info in VALIDITY_PERIODS.items():
+        periods.append({
+            "id": period_key.value,
+            "name": period_info["name"],
+            "description": f"صلاحية لمدة {period_info['name']}"
+        })
+    
+    return {
+        "periods": periods,
+        "default": ValidityPeriod.ONE_MONTH.value
+    }
+
+# -----------------------------------------------------
+# توليد كود تفعيل مع صلاحية محددة
+# -----------------------------------------------------
+@app.post("/generate-code")
+def generate_code(data: GenerateCodeRequest, key: str = None):
+    """توليد كود تفعيل مع صلاحية محددة"""
+    
+    # التحقق من صلاحية المشرف
     if key != ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
-
+    
+    # توليد الكود
     short_code = generate_short_code()
     code_hash = hash_code(short_code)
-
-    expires_at = datetime.datetime.utcnow() + datetime.timedelta(days=30)
-    VALID_CODES[code_hash] = expires_at
-
+    
+    # حساب وقت الانتهاء
+    expires_at = calculate_expiration(data.period, data.custom_days)
+    
+    # حفظ الكود
+    VALID_CODES[code_hash] = {
+        "expires_at": expires_at,
+        "period": data.period.value,
+        "period_name": get_period_name(data.period),
+        "created_at": datetime.datetime.utcnow(),
+        "custom_days": data.custom_days
+    }
+    
+    # تنظيف الرموز المنتهية
+    cleanup_expired_codes()
+    
     return {
         "activation_code": short_code,
-        "expires_in": "30 days"
+        "validity_period": {
+            "id": data.period.value,
+            "name": get_period_name(data.period),
+            "expires_at": expires_at.isoformat(),
+            "remaining": format_remaining_time(expires_at)
+        },
+        "expires_in": format_remaining_time(expires_at),
+        "generated_at": datetime.datetime.utcnow().isoformat()
     }
 
 # -----------------------------------------------------
@@ -363,42 +493,147 @@ def activate(data: ActivateRequest):
     code = data.code.strip()
     if not code:
         raise HTTPException(status_code=400, detail="Code required")
-
+    
     code_hash = hash_code(code)
-    expires_at = VALID_CODES.get(code_hash)
-
-    if not expires_at:
+    code_data = VALID_CODES.get(code_hash)
+    
+    if not code_data:
         raise HTTPException(status_code=403, detail="Invalid code")
-
+    
+    expires_at = code_data["expires_at"]
+    
     if expires_at < datetime.datetime.utcnow():
         VALID_CODES.pop(code_hash, None)
         raise HTTPException(status_code=403, detail="Code expired")
-
-    # إصدار JWT استخدام
+    
+    # إصدار JWT استخدام مع صلاحية الكود
+    remaining_time = expires_at - datetime.datetime.utcnow()
+    jwt_exp_days = min(remaining_time.days, 365)  # حد أقصى 365 يوم
+    
     payload = {
         "type": "activation",
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(days=30)
+        "code_period": code_data["period"],
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(days=jwt_exp_days)
     }
-
+    
     token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-
-    return {"token": token}
+    
+    return {
+        "token": token,
+        "validity_info": {
+            "period": code_data["period_name"],
+            "expires_at": expires_at.isoformat(),
+            "remaining": format_remaining_time(expires_at)
+        }
+    }
 
 # -----------------------------------------------------
 # تحقق من التفعيل
 # -----------------------------------------------------
 @app.get("/verify")
 def verify(x_token: str = Header(..., alias="X-Token")):
-    verify_jwt(x_token)
-    return {"status": "ok"}
+    payload = verify_jwt(x_token)
+    return {
+        "status": "ok",
+        "valid": True,
+        "token_info": {
+            "type": payload.get("type"),
+            "period": payload.get("code_period", "unknown"),
+            "expires_at": datetime.datetime.fromtimestamp(payload["exp"]).isoformat()
+        }
+    }
 
 # -----------------------------------------------------
-# الذكاء الاصطناعي - الطريقة القديمة (للتوافق)
+# الحصول على معلومات الكود
+# -----------------------------------------------------
+@app.get("/code-info/{code}")
+def get_code_info(code: str, admin_key: str = None):
+    """الحصول على معلومات الكود (للمشرف فقط)"""
+    
+    if admin_key != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    code_hash = hash_code(code.strip())
+    code_data = VALID_CODES.get(code_hash)
+    
+    if not code_data:
+        return {"exists": False, "message": "الكود غير موجود"}
+    
+    expires_at = code_data["expires_at"]
+    is_expired = expires_at < datetime.datetime.utcnow()
+    
+    return {
+        "exists": True,
+        "code": code.strip(),
+        "validity": {
+            "period": code_data["period_name"],
+            "created_at": code_data["created_at"].isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "is_expired": is_expired,
+            "remaining": format_remaining_time(expires_at)
+        },
+        "status": "منتهي" if is_expired else "نشط"
+    }
+
+# -----------------------------------------------------
+# تنظيف الرموز المنتهية
+# -----------------------------------------------------
+def cleanup_expired_codes():
+    """تنظيف الرموز المنتهية الصلاحية"""
+    now = datetime.datetime.utcnow()
+    expired_hashes = []
+    
+    for code_hash, code_data in VALID_CODES.items():
+        if code_data["expires_at"] < now:
+            expired_hashes.append(code_hash)
+    
+    for code_hash in expired_hashes:
+        VALID_CODES.pop(code_hash, None)
+    
+    if expired_hashes:
+        print(f"تم تنظيف {len(expired_hashes)} كود منتهي")
+
+# -----------------------------------------------------
+# إحصائيات الرموز
+# -----------------------------------------------------
+@app.get("/code-stats")
+def get_code_stats(admin_key: str):
+    """الحصول على إحصائيات الرموز (للمشرف فقط)"""
+    
+    if admin_key != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    now = datetime.datetime.utcnow()
+    active_codes = 0
+    expired_codes = 0
+    period_stats = {}
+    
+    for code_data in VALID_CODES.values():
+        if code_data["expires_at"] < now:
+            expired_codes += 1
+        else:
+            active_codes += 1
+        
+        period = code_data["period"]
+        period_stats[period] = period_stats.get(period, 0) + 1
+    
+    cleanup_expired_codes()
+    
+    return {
+        "total_codes": len(VALID_CODES),
+        "active_codes": active_codes,
+        "expired_codes": expired_codes,
+        "period_distribution": period_stats,
+        "last_cleanup": now.isoformat()
+    }
+
+# -----------------------------------------------------
+# الذكاء الاصطناعي - الطريقة القديمة
 # -----------------------------------------------------
 @app.post("/generate")
 def generate(data: AskRequest, x_token: str = Header(..., alias="X-Token")):
     verify_jwt(x_token)
-
+    
     try:
         model = pick_gemini_model()
         response = model.generate_content(data.prompt)
@@ -407,7 +642,7 @@ def generate(data: AskRequest, x_token: str = Header(..., alias="X-Token")):
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------
-# الذكاء الاصطناعي للتقرير التربوي (الجديد)
+# الذكاء الاصطناعي للتقرير التربوي
 # -----------------------------------------------------
 @app.post("/generate-report")
 def generate_report(data: ReportRequest, x_token: str = Header(..., alias="X-Token")):
@@ -415,14 +650,9 @@ def generate_report(data: ReportRequest, x_token: str = Header(..., alias="X-Tok
     verify_jwt(x_token)
     
     try:
-        # 1. بناء البرومبت التربوي
         prompt = build_educational_prompt(data)
-        
-        # 2. استدعاء نموذج Gemini
         model = pick_gemini_model()
         response = model.generate_content(prompt)
-        
-        # 3. معالجة النتيجة مع جميع التحسينات
         processed_response = post_process_response(response.text)
         
         return {
@@ -435,7 +665,7 @@ def generate_report(data: ReportRequest, x_token: str = Header(..., alias="X-Tok
         raise HTTPException(status_code=500, detail=f"خطأ في توليد التقرير: {str(e)}")
 
 # -----------------------------------------------------
-# تحديث نقطة النهاية القديمة لدعم كلا الطريقتين
+# النسخة المتوافقة
 # -----------------------------------------------------
 @app.post("/v2/generate")
 def generate_v2(data: dict, x_token: str = Header(..., alias="X-Token")):
@@ -443,12 +673,10 @@ def generate_v2(data: dict, x_token: str = Header(..., alias="X-Token")):
     verify_jwt(x_token)
     
     try:
-        # الطريقة الجديدة: إذا كان يحتوي على بيانات التقرير
         if "report_type" in data:
             report_data = ReportRequest(**data)
             prompt = build_educational_prompt(report_data)
         else:
-            # الطريقة القديمة: إذا كان يحتوي على prompt مباشر
             prompt = data.get("prompt", "")
         
         if not prompt:
@@ -457,7 +685,6 @@ def generate_v2(data: dict, x_token: str = Header(..., alias="X-Token")):
         model = pick_gemini_model()
         response = model.generate_content(prompt)
         
-        # إذا كان طلب تقرير، قم بمعالجته مع جميع التحسينات
         if "report_type" in data:
             processed_response = post_process_response(response.text)
             return {"answer": processed_response}
@@ -467,6 +694,14 @@ def generate_v2(data: dict, x_token: str = Header(..., alias="X-Token")):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# -----------------------------------------------------
+# وظيفة تنظيف دورية
+# -----------------------------------------------------
+@app.on_event("startup")
+def startup_event():
+    """تنظيف الرموز المنتهية عند بدء التشغيل"""
+    cleanup_expired_codes()
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)
