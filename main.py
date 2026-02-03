@@ -779,7 +779,11 @@ def parse_ai_response(response_text: str, report_type: str = "") -> Dict[str, st
     # تطبيق الإثراء الذكي على كل حقل
     for key in parsed:
         if parsed[key]:  # إذا كان النص غير فارغ
-            parsed[key] = enrich_and_enforce(parsed[key], 25, 35, report_type)
+            parsed[key] = enforce_strict_limit(
+    enrich_and_enforce(parsed[key], 25, 30, report_type),
+    25,
+    30
+)
     
     # إذا فشل التحليل، نستخدم النصوص الافتراضية مع الإثراء
     if not any(parsed.values()):
