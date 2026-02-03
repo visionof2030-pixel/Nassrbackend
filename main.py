@@ -99,9 +99,9 @@ DURATIONS = {
     "1d": timedelta(days=1),
     "3d": timedelta(days=3),
     "7d": timedelta(days=7),
-    "1m": timedelta(days=30),
-    "3m": timedelta(days=90),
-    "5mth": timedelta(days=150),
+    "30d": timedelta(days=30),
+    "90d": timedelta(days=90),
+    "150d": timedelta(days=150),
 }
 
 # =====================================================
